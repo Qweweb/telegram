@@ -2,6 +2,7 @@ package com.qweweb.datasearch;
 
 import android.annotation.SuppressLint;
 import android.graphics.Bitmap;
+import android.graphics.Color;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.view.View;
@@ -33,21 +34,29 @@ public class MainActivity extends AppCompatActivity {
         swipeRefresh = findViewById(R.id.swipeRefresh);
         progressBar = findViewById(R.id.progressBar);
 
+        // Pure black styling
+        webView.setBackgroundColor(Color.BLACK);
+
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setDatabaseEnabled(true);
         settings.setLoadsImagesAutomatically(true);
-        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+        
+        // Disable cache on mobile so fresh Matrix UI is always served
+        settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
+        webView.clearCache(true);
+
         settings.setUseWideViewPort(true);
         settings.setLoadWithOverviewMode(true);
 
-        // Hardware Device Bridge: provides persistent ANDROID_ID even after uninstall/reinstall
+        // Hardware Device Bridge
         webView.addJavascriptInterface(new Object() {
             @JavascriptInterface
             public String getDeviceId() {
                 try {
-                    return Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+                    String id = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+                    return (id != null) ? id : "";
                 } catch (Exception e) {
                     return "";
                 }
@@ -83,7 +92,10 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        swipeRefresh.setOnRefreshListener(() -> webView.reload());
+        swipeRefresh.setOnRefreshListener(() -> {
+            webView.clearCache(true);
+            webView.reload();
+        });
 
         webView.loadUrl(APP_URL);
     }

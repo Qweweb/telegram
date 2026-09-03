@@ -1,5 +1,5 @@
 document.addEventListener("DOMContentLoaded", () => {
-    // --- 1. Matrix Animated Digital Rain Background ---
+    // --- 1. Authentic Dense Matrix Digital Rain Animation (Image 3 Style) ---
     const canvas = document.getElementById("matrixCanvas");
     const ctx = canvas.getContext("2d");
 
@@ -10,8 +10,9 @@ document.addEventListener("DOMContentLoaded", () => {
     resizeCanvas();
     window.addEventListener("resize", resizeCanvas);
 
-    const chars = "010101010101ABCDEFGHIJKLMNOPQRSTUVWXYZｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾂﾃﾅﾆﾇﾈﾊﾋﾎﾏﾐﾑﾒﾓﾔﾕﾗﾘﾜ9876543210";
-    const fontSize = 14;
+    // Matrix characters (0, 1, binary, and digital glyphs)
+    const chars = "01010101010110010101010101010101010111001010101019876543210#@&*%$";
+    const fontSize = 16;
     let columns = Math.floor(canvas.width / fontSize);
     let drops = Array(columns).fill(1);
 
@@ -21,24 +22,30 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     function drawMatrix() {
-        ctx.fillStyle = "rgba(3, 7, 8, 0.08)";
+        // Deep translucent black trail
+        ctx.fillStyle = "rgba(0, 0, 0, 0.06)";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        ctx.font = fontSize + "px 'JetBrains Mono', monospace";
+        ctx.font = "bold " + fontSize + "px 'JetBrains Mono', monospace";
 
         for (let i = 0; i < drops.length; i++) {
-            const text = chars.charAt(Math.floor(Math.random() * chars.length));
-            
+            const char = chars.charAt(Math.floor(Math.random() * chars.length));
+            const x = i * fontSize;
+            const y = drops[i] * fontSize;
+
             // Random bright head character
-            if (Math.random() > 0.85) {
+            if (Math.random() > 0.88) {
                 ctx.fillStyle = "#ffffff";
+                ctx.shadowColor = "#00ff41";
+                ctx.shadowBlur = 8;
             } else {
-                ctx.fillStyle = "#00ff66";
+                ctx.fillStyle = "#00ff41";
+                ctx.shadowBlur = 0;
             }
 
-            ctx.fillText(text, i * fontSize, drops[i] * fontSize);
+            ctx.fillText(char, x, y);
 
-            if (drops[i] * fontSize > canvas.height && Math.random() > 0.975) {
+            if (y > canvas.height && Math.random() > 0.975) {
                 drops[i] = 0;
             }
             drops[i]++;
@@ -48,19 +55,15 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // --- 2. Persistent Hardware Device ID ---
     function getDeviceIdentifier() {
-        // 1. Try Native Android Hardware ID from APK interface
         if (window.AndroidBridge && typeof window.AndroidBridge.getDeviceId === "function") {
             try {
                 const nativeId = window.AndroidBridge.getDeviceId();
                 if (nativeId && nativeId.trim()) {
                     return "hw_" + nativeId.trim();
                 }
-            } catch (e) {
-                console.warn("AndroidBridge error", e);
-            }
+            } catch (e) {}
         }
 
-        // 2. Persistent Local Storage + Screen/Canvas Fingerprint
         let storedId = localStorage.getItem("dev_fingerprint_id");
         if (!storedId) {
             const screenInfo = `${screen.width}x${screen.height}_${screen.colorDepth}_${navigator.hardwareConcurrency || 4}`;
@@ -73,7 +76,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const currentDeviceId = getDeviceIdentifier();
 
-    // --- 3. DOM Elements & State ---
+    // --- 3. DOM Elements ---
     const statusBadge = document.getElementById("statusBadge");
     const statusText = document.getElementById("statusText");
     const quotaText = document.getElementById("quotaText");
@@ -139,13 +142,13 @@ document.addEventListener("DOMContentLoaded", () => {
                 totalCooldownSeconds = data.cooldown_total;
             }
 
-            // Clean Connected label (bot name removed)
+            // Clean 100% Anonymous Connected Label (No Bot Name)
             if (data.authorized) {
                 statusBadge.className = "status-badge status-online";
-                statusText.textContent = "Connected";
+                statusText.textContent = "CONNECTED";
             } else {
                 statusBadge.className = "status-badge status-offline";
-                statusText.textContent = "Auth Required";
+                statusText.textContent = "OFFLINE";
             }
 
             // Quota Badge
@@ -156,7 +159,7 @@ document.addEventListener("DOMContentLoaded", () => {
             // Device Lockout Check
             if (data.is_locked) {
                 searchBtn.disabled = true;
-                showError(`Device Limit Reached: ${data.max_searches}/${data.max_searches} searches used. Access is locked for this device.`);
+                showError(`DEVICE ACCESS LOCKED: ${data.max_searches}/${data.max_searches} searches used.`);
                 return;
             }
 
@@ -165,7 +168,7 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         } catch (err) {
             statusBadge.className = "status-badge status-offline";
-            statusText.textContent = "Offline";
+            statusText.textContent = "OFFLINE";
         }
     }
 
@@ -260,7 +263,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const data = await res.json();
 
             if (res.status === 403) {
-                showError(data.message || "Search quota limit reached for this device (7/7).");
+                showError(data.message || "Quota limit reached for this device (7/7).");
                 quotaText.textContent = "0/7";
                 return;
             }
@@ -280,7 +283,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 throw new Error(data.detail || data.message || "Request failed");
             }
 
-            // Update Quota display
             if (data.searches_left !== undefined) {
                 quotaText.textContent = `${data.searches_left}/${data.max_searches || 7}`;
             }
@@ -290,13 +292,12 @@ document.addEventListener("DOMContentLoaded", () => {
             resultOutput.textContent = data.result || "No data returned.";
             resultSection.classList.remove("hidden");
 
-            // Start Cooldown
             if (data.cooldown_seconds) {
                 startCooldown(data.cooldown_seconds, data.cooldown_seconds);
             }
 
         } catch (err) {
-            showError(err.message || "Failed to query the database.");
+            showError(err.message || "Failed to query database.");
         } finally {
             searchBtn.classList.remove("loading");
             if (!cooldownInterval || localStorage.getItem("cooldown_end_time") === null) {
@@ -311,13 +312,11 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!text) return;
         try {
             await navigator.clipboard.writeText(text);
-            copyBtnText.textContent = "Copied!";
+            copyBtnText.textContent = "COPIED";
             setTimeout(() => {
-                copyBtnText.textContent = "Copy";
+                copyBtnText.textContent = "COPY";
             }, 2000);
-        } catch (err) {
-            console.error("Failed to copy", err);
-        }
+        } catch (err) {}
     });
 
     checkStoredCooldown();
