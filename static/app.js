@@ -1,6 +1,82 @@
 document.addEventListener("DOMContentLoaded", () => {
+    // --- 1. Matrix Animated Digital Rain Background ---
+    const canvas = document.getElementById("matrixCanvas");
+    const ctx = canvas.getContext("2d");
+
+    function resizeCanvas() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    }
+    resizeCanvas();
+    window.addEventListener("resize", resizeCanvas);
+
+    const chars = "010101010101ABCDEFGHIJKLMNOPQRSTUVWXYZｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾂﾃﾅﾆﾇﾈﾊﾋﾎﾏﾐﾑﾒﾓﾔﾕﾗﾘﾜ9876543210";
+    const fontSize = 14;
+    let columns = Math.floor(canvas.width / fontSize);
+    let drops = Array(columns).fill(1);
+
+    window.addEventListener("resize", () => {
+        columns = Math.floor(canvas.width / fontSize);
+        drops = Array(columns).fill(1);
+    });
+
+    function drawMatrix() {
+        ctx.fillStyle = "rgba(3, 7, 8, 0.08)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.font = fontSize + "px 'JetBrains Mono', monospace";
+
+        for (let i = 0; i < drops.length; i++) {
+            const text = chars.charAt(Math.floor(Math.random() * chars.length));
+            
+            // Random bright head character
+            if (Math.random() > 0.85) {
+                ctx.fillStyle = "#ffffff";
+            } else {
+                ctx.fillStyle = "#00ff66";
+            }
+
+            ctx.fillText(text, i * fontSize, drops[i] * fontSize);
+
+            if (drops[i] * fontSize > canvas.height && Math.random() > 0.975) {
+                drops[i] = 0;
+            }
+            drops[i]++;
+        }
+    }
+    setInterval(drawMatrix, 33);
+
+    // --- 2. Persistent Hardware Device ID ---
+    function getDeviceIdentifier() {
+        // 1. Try Native Android Hardware ID from APK interface
+        if (window.AndroidBridge && typeof window.AndroidBridge.getDeviceId === "function") {
+            try {
+                const nativeId = window.AndroidBridge.getDeviceId();
+                if (nativeId && nativeId.trim()) {
+                    return "hw_" + nativeId.trim();
+                }
+            } catch (e) {
+                console.warn("AndroidBridge error", e);
+            }
+        }
+
+        // 2. Persistent Local Storage + Screen/Canvas Fingerprint
+        let storedId = localStorage.getItem("dev_fingerprint_id");
+        if (!storedId) {
+            const screenInfo = `${screen.width}x${screen.height}_${screen.colorDepth}_${navigator.hardwareConcurrency || 4}`;
+            const randomPart = Math.random().toString(36).substring(2, 12) + Date.now().toString(36);
+            storedId = `dev_${screenInfo}_${randomPart}`;
+            localStorage.setItem("dev_fingerprint_id", storedId);
+        }
+        return storedId;
+    }
+
+    const currentDeviceId = getDeviceIdentifier();
+
+    // --- 3. DOM Elements & State ---
     const statusBadge = document.getElementById("statusBadge");
     const statusText = document.getElementById("statusText");
+    const quotaText = document.getElementById("quotaText");
     const searchForm = document.getElementById("searchForm");
     const queryInput = document.getElementById("queryInput");
     const clearBtn = document.getElementById("clearBtn");
@@ -19,26 +95,69 @@ document.addEventListener("DOMContentLoaded", () => {
     let cooldownInterval = null;
     let totalCooldownSeconds = 600;
 
-    // Secret Admin Click Counter
+    // --- 4. Secret Admin 10-Tap Reset ---
     let adminClickCount = 0;
     let adminClickTimer = null;
 
+    function handleSecretAdminReset() {
+        adminClickCount++;
+        clearTimeout(adminClickTimer);
+        adminClickTimer = setTimeout(() => {
+            adminClickCount = 0;
+        }, 3000);
+
+        if (adminClickCount >= 10) {
+            adminClickCount = 0;
+            fetch("/api/admin/reset-cooldown", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ device_id: currentDeviceId })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (cooldownInterval) clearInterval(cooldownInterval);
+                localStorage.removeItem("cooldown_end_time");
+                cooldownContainer.classList.add("hidden");
+                searchBtn.disabled = false;
+                checkStatus();
+            })
+            .catch(err => console.error(err));
+        }
+    }
+
+    cooldownTimer.addEventListener("click", handleSecretAdminReset);
+    cooldownContainer.addEventListener("click", handleSecretAdminReset);
+    statusBadge.addEventListener("click", handleSecretAdminReset);
+
+    // --- 5. Status & Quota Verification ---
     async function checkStatus() {
         try {
-            const res = await fetch("/api/status");
+            const res = await fetch(`/api/status?device_id=${encodeURIComponent(currentDeviceId)}`);
             const data = await res.json();
             
             if (data.cooldown_total) {
                 totalCooldownSeconds = data.cooldown_total;
             }
 
+            // Clean Connected label (bot name removed)
             if (data.authorized) {
                 statusBadge.className = "status-badge status-online";
-                statusText.textContent = `Connected (@${data.bot})`;
+                statusText.textContent = "Connected";
             } else {
                 statusBadge.className = "status-badge status-offline";
                 statusText.textContent = "Auth Required";
-                showError("Telegram account not authorized. Run 'python setup_session.py' in the terminal.");
+            }
+
+            // Quota Badge
+            if (data.searches_left !== undefined) {
+                quotaText.textContent = `${data.searches_left}/${data.max_searches || 7}`;
+            }
+
+            // Device Lockout Check
+            if (data.is_locked) {
+                searchBtn.disabled = true;
+                showError(`Device Limit Reached: ${data.max_searches}/${data.max_searches} searches used. Access is locked for this device.`);
+                return;
             }
 
             if (data.cooldown_remaining > 0) {
@@ -46,11 +165,11 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         } catch (err) {
             statusBadge.className = "status-badge status-offline";
-            statusText.textContent = "Server Offline";
-            showError("Could not connect to backend server.");
+            statusText.textContent = "Offline";
         }
     }
 
+    // --- 6. Cooldown Manager ---
     function startCooldown(remainingSeconds, totalSeconds = 600) {
         if (cooldownInterval) clearInterval(cooldownInterval);
         
@@ -100,33 +219,6 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    // Secret 10-Click Reset on Timer
-    function handleSecretAdminReset() {
-        adminClickCount++;
-        clearTimeout(adminClickTimer);
-        adminClickTimer = setTimeout(() => {
-            adminClickCount = 0;
-        }, 3000); // 10 clicks must be within 3 seconds
-
-        if (adminClickCount >= 10) {
-            adminClickCount = 0;
-            // Call server to reset cooldown timestamp
-            fetch("/api/admin/reset-cooldown", { method: "POST" })
-                .then(r => r.json())
-                .then(() => {
-                    if (cooldownInterval) clearInterval(cooldownInterval);
-                    localStorage.removeItem("cooldown_end_time");
-                    cooldownContainer.classList.add("hidden");
-                    searchBtn.disabled = false;
-                })
-                .catch(err => console.error(err));
-        }
-    }
-
-    // Attach secret listener to both timer and the cooldown container
-    cooldownTimer.addEventListener("click", handleSecretAdminReset);
-    cooldownContainer.addEventListener("click", handleSecretAdminReset);
-
     function showError(msg) {
         errorMessage.textContent = msg;
         errorBanner.classList.remove("hidden");
@@ -147,6 +239,7 @@ document.addEventListener("DOMContentLoaded", () => {
         queryInput.focus();
     });
 
+    // --- 7. Search Execution ---
     searchForm.addEventListener("submit", async (e) => {
         e.preventDefault();
         const query = queryInput.value.trim();
@@ -161,15 +254,24 @@ document.addEventListener("DOMContentLoaded", () => {
             const res = await fetch("/api/search", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ query })
+                body: JSON.stringify({ query, device_id: currentDeviceId })
             });
 
             const data = await res.json();
 
+            if (res.status === 403) {
+                showError(data.message || "Search quota limit reached for this device (7/7).");
+                quotaText.textContent = "0/7";
+                return;
+            }
+
             if (res.status === 429) {
-                showError(data.message || "Rate limit active. Please wait.");
+                showError(data.message || "Cooldown active. Please wait.");
                 if (data.remaining_seconds) {
                     startCooldown(data.remaining_seconds, totalCooldownSeconds);
+                }
+                if (data.searches_left !== undefined) {
+                    quotaText.textContent = `${data.searches_left}/7`;
                 }
                 return;
             }
@@ -178,16 +280,23 @@ document.addEventListener("DOMContentLoaded", () => {
                 throw new Error(data.detail || data.message || "Request failed");
             }
 
-            queryLabel.textContent = `Query: ${data.query}`;
-            resultOutput.textContent = data.result || "No text returned by bot.";
+            // Update Quota display
+            if (data.searches_left !== undefined) {
+                quotaText.textContent = `${data.searches_left}/${data.max_searches || 7}`;
+            }
+
+            // Display Result
+            queryLabel.textContent = `TARGET: ${data.query}`;
+            resultOutput.textContent = data.result || "No data returned.";
             resultSection.classList.remove("hidden");
 
+            // Start Cooldown
             if (data.cooldown_seconds) {
                 startCooldown(data.cooldown_seconds, data.cooldown_seconds);
             }
 
         } catch (err) {
-            showError(err.message || "Failed to query the bot.");
+            showError(err.message || "Failed to query the database.");
         } finally {
             searchBtn.classList.remove("loading");
             if (!cooldownInterval || localStorage.getItem("cooldown_end_time") === null) {
@@ -196,6 +305,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     });
 
+    // Copy Result
     copyBtn.addEventListener("click", async () => {
         const text = resultOutput.textContent;
         if (!text) return;

@@ -3,7 +3,9 @@ package com.qweweb.datasearch;
 import android.annotation.SuppressLint;
 import android.graphics.Bitmap;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.view.View;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
@@ -39,6 +41,18 @@ public class MainActivity extends AppCompatActivity {
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
         settings.setUseWideViewPort(true);
         settings.setLoadWithOverviewMode(true);
+
+        // Hardware Device Bridge: provides persistent ANDROID_ID even after uninstall/reinstall
+        webView.addJavascriptInterface(new Object() {
+            @JavascriptInterface
+            public String getDeviceId() {
+                try {
+                    return Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+                } catch (Exception e) {
+                    return "";
+                }
+            }
+        }, "AndroidBridge");
 
         webView.setWebViewClient(new WebViewClient() {
             @Override

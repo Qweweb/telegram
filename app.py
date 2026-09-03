@@ -2,11 +2,12 @@ import os
 import time
 import asyncio
 import logging
+import sqlite3
 from contextlib import asynccontextmanager
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -23,11 +24,62 @@ API_HASH = os.getenv("TG_API_HASH")
 TG_SESSION_STRING = os.getenv("TG_SESSION_STRING")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "SoSOsintX_bot")
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "600"))
+MAX_SEARCH_LIMIT = int(os.getenv("MAX_SEARCH_LIMIT", "7"))
 PORT = int(os.getenv("PORT", "8000"))
 HOST = os.getenv("HOST", "0.0.0.0")
 
+# Database Setup for persistent device tracking
+DB_PATH = os.path.join(os.path.dirname(__file__), "device_tracking.db")
+
+def init_db():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS device_usage (
+                device_id TEXT PRIMARY KEY,
+                search_count INTEGER DEFAULT 0,
+                last_search_time REAL DEFAULT 0,
+                is_blocked INTEGER DEFAULT 0,
+                created_at REAL DEFAULT (strftime('%s', 'now'))
+            )
+        """)
+        conn.commit()
+
+init_db()
+
+def get_device_info(device_id: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT search_count, last_search_time, is_blocked FROM device_usage WHERE device_id = ?", (device_id,))
+        row = cursor.fetchone()
+        if row:
+            return {"search_count": row[0], "last_search_time": row[1], "is_blocked": bool(row[2])}
+        else:
+            cursor.execute("INSERT INTO device_usage (device_id, search_count, last_search_time) VALUES (?, 0, 0)", (device_id,))
+            conn.commit()
+            return {"search_count": 0, "last_search_time": 0.0, "is_blocked": False}
+
+def update_device_search(device_id: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        now = time.time()
+        cursor.execute("""
+            UPDATE device_usage 
+            SET search_count = search_count + 1, last_search_time = ? 
+            WHERE device_id = ?
+        """, (now, device_id))
+        conn.commit()
+
+def reset_device_db(device_id: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE device_usage 
+            SET search_count = 0, last_search_time = 0, is_blocked = 0 
+            WHERE device_id = ?
+        """, (device_id,))
+        conn.commit()
+
 client: Optional[TelegramClient] = None
-last_query_timestamp: float = 0.0
 query_lock = asyncio.Lock()
 
 COMMON_LABELS = {
@@ -55,7 +107,6 @@ COMMON_LABELS = {
 }
 
 def safe_translate(text: str) -> str:
-    """Safely and accurately translates text and labels to English without 500 error bugs."""
     if not text or not text.strip():
         return text
 
@@ -71,7 +122,6 @@ def safe_translate(text: str) -> str:
         if not p_clean:
             translated_paragraphs.append(p)
             continue
-        
         try:
             t = GoogleTranslator(source="auto", target="en").translate(p_clean)
             if t and "Error 500" not in t and "That's an error" not in t:
@@ -83,13 +133,6 @@ def safe_translate(text: str) -> str:
 
     return "\n\n".join(translated_paragraphs)
 
-def get_cooldown_remaining() -> int:
-    global last_query_timestamp, COOLDOWN_SECONDS
-    elapsed = time.time() - last_query_timestamp
-    if elapsed < COOLDOWN_SECONDS:
-        return int(COOLDOWN_SECONDS - elapsed)
-    return 0
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global client
@@ -99,12 +142,10 @@ async def lifespan(app: FastAPI):
     else:
         try:
             api_id_int = int(API_ID)
-            # 1. Try StringSession first (ideal for Cloud like Render/Railway)
             if TG_SESSION_STRING and TG_SESSION_STRING.strip():
                 logger.info("Using StringSession from environment variable.")
                 client = TelegramClient(StringSession(TG_SESSION_STRING.strip()), api_id_int, API_HASH)
             else:
-                # 2. Fallback to local session file
                 session_path = os.path.join(os.path.dirname(__file__), "user_session")
                 logger.info(f"Using file session at {session_path}")
                 client = TelegramClient(session_path, api_id_int, API_HASH)
@@ -126,34 +167,65 @@ app = FastAPI(title="Telegram Bot Bridge", lifespan=lifespan)
 
 class SearchRequest(BaseModel):
     query: str
+    device_id: Optional[str] = "default_device"
 
 @app.get("/api/status")
-async def get_status():
+async def get_status(device_id: Optional[str] = "default_device"):
     is_connected = bool(client and client.is_connected() and await client.is_user_authorized())
+    dev = get_device_info(device_id)
+    
+    elapsed = time.time() - dev["last_search_time"]
+    cooldown_remaining = max(0, int(COOLDOWN_SECONDS - elapsed)) if elapsed < COOLDOWN_SECONDS else 0
+    searches_left = max(0, MAX_SEARCH_LIMIT - dev["search_count"])
+    is_locked = (dev["search_count"] >= MAX_SEARCH_LIMIT) or dev["is_blocked"]
+
     return {
         "status": "online",
         "authorized": is_connected,
-        "bot": BOT_USERNAME,
-        "cooldown_remaining": get_cooldown_remaining(),
-        "cooldown_total": COOLDOWN_SECONDS
+        "cooldown_remaining": cooldown_remaining,
+        "cooldown_total": COOLDOWN_SECONDS,
+        "searches_left": searches_left,
+        "max_searches": MAX_SEARCH_LIMIT,
+        "is_locked": is_locked
     }
 
+class ResetRequest(BaseModel):
+    device_id: Optional[str] = "default_device"
+
 @app.post("/api/admin/reset-cooldown")
-async def reset_cooldown():
-    global last_query_timestamp
-    last_query_timestamp = 0.0
-    logger.info("Admin secret reset triggered: Cooldown reset to 0.")
-    return {"status": "success", "message": "Cooldown reset to 0 successfully."}
+async def reset_cooldown(req: ResetRequest):
+    reset_device_db(req.device_id)
+    logger.info(f"Admin secret reset triggered: Quota & cooldown reset for device {req.device_id}.")
+    return {
+        "status": "success", 
+        "message": f"Cooldown and search limit reset to {MAX_SEARCH_LIMIT} for device."
+    }
 
 @app.post("/api/search")
 async def search_number(req: SearchRequest):
-    global last_query_timestamp, client
+    global client
     cleaned_query = req.query.strip()
+    device_id = req.device_id.strip() if req.device_id else "default_device"
+
     if not cleaned_query:
         raise HTTPException(status_code=400, detail="Search query cannot be empty.")
     
-    remaining = get_cooldown_remaining()
-    if remaining > 0:
+    # 1. Check Device Quota Limit
+    dev = get_device_info(device_id)
+    if dev["search_count"] >= MAX_SEARCH_LIMIT or dev["is_blocked"]:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "limit_reached",
+                "message": f"Access Limit Reached: {MAX_SEARCH_LIMIT}/{MAX_SEARCH_LIMIT} searches used on this device. Device locked.",
+                "searches_left": 0
+            }
+        )
+
+    # 2. Check Device Cooldown
+    elapsed = time.time() - dev["last_search_time"]
+    if elapsed < COOLDOWN_SECONDS:
+        remaining = int(COOLDOWN_SECONDS - elapsed)
         mins = remaining // 60
         secs = remaining % 60
         return JSONResponse(
@@ -161,29 +233,34 @@ async def search_number(req: SearchRequest):
             content={
                 "error": "cooldown_active",
                 "message": f"Cooldown active. Please wait {mins}m {secs}s before next search.",
-                "remaining_seconds": remaining
+                "remaining_seconds": remaining,
+                "searches_left": max(0, MAX_SEARCH_LIMIT - dev["search_count"])
             }
         )
 
     if not client or not client.is_connected():
         raise HTTPException(status_code=503, detail="Telegram client is not connected.")
     if not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram account is not authorized. Please run setup_session.py.")
+        raise HTTPException(status_code=503, detail="Telegram account is not authorized.")
 
     async with query_lock:
-        remaining = get_cooldown_remaining()
-        if remaining > 0:
+        # Re-check quota and cooldown inside lock
+        dev = get_device_info(device_id)
+        if dev["search_count"] >= MAX_SEARCH_LIMIT:
+            return JSONResponse(
+                status_code=403,
+                content={"error": "limit_reached", "message": "Device quota exceeded (7/7)."}
+            )
+        elapsed = time.time() - dev["last_search_time"]
+        if elapsed < COOLDOWN_SECONDS:
+            remaining = int(COOLDOWN_SECONDS - elapsed)
             return JSONResponse(
                 status_code=429,
-                content={
-                    "error": "cooldown_active",
-                    "message": f"Cooldown active. Please wait {remaining}s.",
-                    "remaining_seconds": remaining
-                }
+                content={"error": "cooldown_active", "message": f"Cooldown active: {remaining}s remaining.", "remaining_seconds": remaining}
             )
 
         try:
-            logger.info(f"Querying @{BOT_USERNAME} with query: {cleaned_query}")
+            logger.info(f"Device [{device_id}] querying @{BOT_USERNAME} with query: {cleaned_query}")
             
             messages_collected = []
             async with client.conversation(BOT_USERNAME, timeout=35) as conv:
@@ -194,7 +271,7 @@ async def search_number(req: SearchRequest):
                 if first_response.raw_text or first_response.message:
                     messages_collected.append((first_response.raw_text or first_response.message).strip())
                 
-                # 2. Wait for any subsequent detailed messages (like leak reports)
+                # 2. Wait for any subsequent detailed messages
                 while True:
                     try:
                         next_response = await conv.get_response(timeout=4)
@@ -204,7 +281,7 @@ async def search_number(req: SearchRequest):
                     except asyncio.TimeoutError:
                         break
 
-            # Process and translate collected messages
+            # Translate collected messages
             translated_messages = []
             for msg_text in messages_collected:
                 trans = safe_translate(msg_text)
@@ -213,13 +290,19 @@ async def search_number(req: SearchRequest):
             divider = "\n\n" + "—" * 35 + "\n\n"
             final_text = divider.join(translated_messages) if translated_messages else "No response returned by bot."
             
-            last_query_timestamp = time.time()
+            # Update device usage in SQLite
+            update_device_search(device_id)
+            updated_dev = get_device_info(device_id)
+            searches_left = max(0, MAX_SEARCH_LIMIT - updated_dev["search_count"])
+
             return {
                 "status": "success",
                 "query": cleaned_query,
                 "result": final_text,
                 "timestamp": int(time.time()),
-                "cooldown_seconds": COOLDOWN_SECONDS
+                "cooldown_seconds": COOLDOWN_SECONDS,
+                "searches_left": searches_left,
+                "max_searches": MAX_SEARCH_LIMIT
             }
 
         except asyncio.TimeoutError:
@@ -242,7 +325,7 @@ async def serve_index():
     index_file = os.path.join(static_dir, "index.html")
     if os.path.exists(index_file):
         return FileResponse(index_file)
-    return {"message": "Telegram Bot Bridge API is running. UI file static/index.html not found."}
+    return {"message": "Telegram Bot Bridge API is running."}
 
 if __name__ == "__main__":
     import uvicorn
