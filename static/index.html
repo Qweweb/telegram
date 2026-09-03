@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lookup Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="background-glow"></div>
+
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo-group">
+                <div class="logo-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                </div>
+                <div>
+                    <h1>Data Search Bridge</h1>
+                    <p class="subtitle">Secure minimal query interface</p>
+                </div>
+            </div>
+            <div id="statusBadge" class="status-badge status-checking">
+                <span class="status-dot"></span>
+                <span id="statusText">Checking...</span>
+            </div>
+        </header>
+
+        <!-- Main Card -->
+        <main class="card">
+            <!-- Search Form -->
+            <form id="searchForm" class="search-form">
+                <div class="input-wrapper">
+                    <input 
+                        type="text" 
+                        id="queryInput" 
+                        placeholder="Enter phone number or query..." 
+                        autocomplete="off" 
+                        required
+                    />
+                    <button type="button" id="clearBtn" class="clear-btn" title="Clear input">
+                        &times;
+                    </button>
+                </div>
+                <button type="submit" id="searchBtn" class="primary-btn">
+                    <span class="btn-text">Search</span>
+                    <span class="btn-loader"></span>
+                </button>
+            </form>
+
+            <!-- Cooldown Bar -->
+            <div id="cooldownContainer" class="cooldown-container hidden">
+                <div class="cooldown-header">
+                    <span class="cooldown-label">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <polyline points="12 6 12 12 16 14"></polyline>
+                        </svg>
+                        Rate-Limit Cooldown Active
+                    </span>
+                    <span id="cooldownTimer" class="cooldown-timer">10:00</span>
+                </div>
+                <div class="progress-track">
+                    <div id="progressBar" class="progress-fill"></div>
+                </div>
+                <p class="cooldown-note">To ensure stability, a 10-minute cooldown is enforced between searches.</p>
+            </div>
+
+            <!-- Error Banner -->
+            <div id="errorBanner" class="error-banner hidden">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="8" x2="12" y2="12"></line>
+                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                </svg>
+                <span id="errorMessage">An error occurred</span>
+            </div>
+
+            <!-- Result Section -->
+            <div id="resultSection" class="result-section hidden">
+                <div class="result-header">
+                    <div class="result-title-group">
+                        <span class="result-tag">RESULT</span>
+                        <span id="queryLabel" class="query-label"></span>
+                    </div>
+                    <button id="copyBtn" class="secondary-btn" title="Copy to clipboard">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                        <span id="copyBtnText">Copy</span>
+                    </button>
+                </div>
+                <div class="terminal-body">
+                    <pre id="resultOutput"></pre>
+                </div>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <span>Client-side Bridge &bull; 10-min interval</span>
+        </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
