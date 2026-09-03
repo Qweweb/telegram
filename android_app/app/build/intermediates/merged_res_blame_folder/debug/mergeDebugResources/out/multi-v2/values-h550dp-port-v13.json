@@ -1,0 +1,19 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.qweweb.datasearch.app-mergeDebugResources-30:/values-h550dp-port-v13/values-h550dp-port-v13.xml",
+            "map": [
+                {
+                    "source": "C:\\Users\\alpha\\.gradle\\caches\\8.14.3\\transforms\\80d7333a7a77c2f888881354c2434e09\\transformed\\material-1.11.0\\res\\values-h550dp-port-v13\\values-h550dp-port-v13.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endColumns": "64",
+                        "endOffsets": "115"
+                    }
+                }
+            ]
+        }
+    ]
+}
