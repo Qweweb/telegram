@@ -3,20 +3,21 @@ import time
 import asyncio
 import logging
 import sqlite3
+import urllib.request
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, List
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, Header
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from telethon import TelegramClient, errors
+from telethon import TelegramClient, errors, custom
 from telethon.sessions import StringSession
 from deep_translator import GoogleTranslator
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("telegram_bridge")
+logger = logging.getLogger("system_bridge")
 
 load_dotenv()
 API_ID = os.getenv("TG_API_ID")
@@ -133,37 +134,47 @@ def safe_translate(text: str) -> str:
 
     return "\n\n".join(translated_paragraphs)
 
+# Keep-Alive Background Worker to prevent Render instance sleep
+async def keep_alive_worker():
+    await asyncio.sleep(60)
+    while True:
+        try:
+            render_url = os.getenv("RENDER_EXTERNAL_URL", "https://telegram-search-app.onrender.com")
+            if render_url:
+                urllib.request.urlopen(f"{render_url}/api/status", timeout=10)
+                logger.info("Self-ping keep-alive successful.")
+        except Exception:
+            pass
+        await asyncio.sleep(600)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global client
-    logger.info("Initializing Telegram Client...")
-    if not API_ID or not API_HASH or API_ID == "your_api_id_here":
-        logger.warning("TG_API_ID or TG_API_HASH not configured in .env!")
-    else:
+    logger.info("Initializing Core Engine...")
+    
+    if API_ID and API_HASH and API_ID != "your_api_id_here":
         try:
             api_id_int = int(API_ID)
             if TG_SESSION_STRING and TG_SESSION_STRING.strip():
-                logger.info("Using StringSession from environment variable.")
                 client = TelegramClient(StringSession(TG_SESSION_STRING.strip()), api_id_int, API_HASH)
             else:
                 session_path = os.path.join(os.path.dirname(__file__), "user_session")
-                logger.info(f"Using file session at {session_path}")
                 client = TelegramClient(session_path, api_id_int, API_HASH)
 
             await client.connect()
             if await client.is_user_authorized():
-                me = await client.get_me()
-                logger.info(f"Connected to Telegram as {me.first_name} (@{me.username or 'NoUsername'})")
+                logger.info("Core Engine Connected Successfully.")
             else:
-                logger.warning("Telegram client is not authorized. Please run 'python setup_session.py' first.")
+                logger.warning("Session authorization required.")
         except Exception as e:
-            logger.error(f"Failed to initialize Telegram client: {e}")
+            logger.error(f"Initialization error: {e}")
+
+    asyncio.create_task(keep_alive_worker())
     yield
     if client and client.is_connected():
-        logger.info("Disconnecting Telegram client...")
         await client.disconnect()
 
-app = FastAPI(title="Telegram Bot Bridge", lifespan=lifespan)
+app = FastAPI(title="Search Protocol", lifespan=lifespan)
 
 class SearchRequest(BaseModel):
     query: str
@@ -195,11 +206,105 @@ class ResetRequest(BaseModel):
 @app.post("/api/admin/reset-cooldown")
 async def reset_cooldown(req: ResetRequest):
     reset_device_db(req.device_id)
-    logger.info(f"Admin secret reset triggered: Quota & cooldown reset for device {req.device_id}.")
+    logger.info(f"Admin reset triggered for device [{req.device_id}].")
     return {
         "status": "success", 
-        "message": f"Cooldown and search limit reset to {MAX_SEARCH_LIMIT} for device."
+        "message": f"Reset successful for device."
     }
+
+async def fetch_all_paginated_pages(client: TelegramClient, target_bot: str, main_msg) -> List[str]:
+    """Automatically navigates through all [➡️] pages and aggregates the entire content."""
+    pages = []
+    seen_texts = set()
+    
+    current_msg = main_msg
+    page_count = 1
+    max_pages = 12  # Safety ceiling
+    
+    while current_msg and page_count <= max_pages:
+        raw = (current_msg.raw_text or current_msg.message or "").strip()
+        if raw and raw not in seen_texts:
+            seen_texts.add(raw)
+            pages.append(raw)
+        
+        # Check for inline buttons with next arrow
+        if not current_msg.buttons:
+            break
+            
+        next_button = None
+        for row in current_msg.buttons:
+            for btn in row:
+                btn_text = btn.text.strip()
+                if "➡️" in btn_text or "▶" in btn_text or "»" in btn_text:
+                    next_button = btn
+                    break
+            if next_button:
+                break
+                
+        if not next_button:
+            break
+            
+        try:
+            # Click next page button
+            logger.info(f"Auto-fetching Next Page ({page_count + 1})...")
+            await next_button.click()
+            await asyncio.sleep(1.8)  # Wait for Telegram message edit to register
+            
+            # Fetch updated message content from Telegram
+            updated_messages = await client.get_messages(target_bot, ids=current_msg.id)
+            if updated_messages:
+                updated_text = (updated_messages.raw_text or updated_messages.message or "").strip()
+                if updated_text == raw or updated_text in seen_texts:
+                    # Content did not change, reached end of pages
+                    break
+                current_msg = updated_messages
+                page_count += 1
+            else:
+                break
+        except Exception as e:
+            logger.warning(f"Pagination click ended/error: {e}")
+            break
+            
+    return pages
+
+async def try_download_full_file(client: TelegramClient, target_bot: str, main_msg, conv) -> Optional[str]:
+    """Checks for [Download] button and extracts file content if available."""
+    if not main_msg or not main_msg.buttons:
+        return None
+
+    download_button = None
+    for row in main_msg.buttons:
+        for btn in row:
+            btn_text = btn.text.lower()
+            if "download" in btn_text or "скачать" in btn_text or "file" in btn_text:
+                download_button = btn
+                break
+        if download_button:
+            break
+
+    if not download_button:
+        return None
+
+    try:
+        logger.info("Auto-clicking [Download] button for full unpaginated dump...")
+        await download_button.click()
+        
+        # Await incoming document / file message from bot
+        file_msg = await conv.get_response(timeout=8)
+        if file_msg and file_msg.media:
+            downloaded_bytes = await client.download_media(file_msg, bytes)
+            if downloaded_bytes:
+                try:
+                    text_content = downloaded_bytes.decode("utf-8", errors="ignore")
+                    if len(text_content.strip()) > 20:
+                        logger.info(f"Successfully downloaded full file dump ({len(text_content)} chars).")
+                        return text_content.strip()
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.warning(f"Download button extraction: {e}")
+
+    return None
 
 @app.post("/api/search")
 async def search_number(req: SearchRequest):
@@ -217,7 +322,7 @@ async def search_number(req: SearchRequest):
             status_code=403,
             content={
                 "error": "limit_reached",
-                "message": f"Access Limit Reached: {MAX_SEARCH_LIMIT}/{MAX_SEARCH_LIMIT} searches used on this device. Device locked.",
+                "message": f"Access Limit: {MAX_SEARCH_LIMIT}/{MAX_SEARCH_LIMIT} searches used on this device. Device locked.",
                 "searches_left": 0
             }
         )
@@ -239,47 +344,64 @@ async def search_number(req: SearchRequest):
         )
 
     if not client or not client.is_connected():
-        raise HTTPException(status_code=503, detail="Telegram client is not connected.")
+        raise HTTPException(status_code=503, detail="Search system is offline.")
     if not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram account is not authorized.")
+        raise HTTPException(status_code=503, detail="Search system authorization required.")
 
     async with query_lock:
-        # Re-check quota and cooldown inside lock
         dev = get_device_info(device_id)
         if dev["search_count"] >= MAX_SEARCH_LIMIT:
             return JSONResponse(
                 status_code=403,
-                content={"error": "limit_reached", "message": "Device quota exceeded (7/7)."}
+                content={"error": "limit_reached", "message": "Device quota exceeded."}
             )
         elapsed = time.time() - dev["last_search_time"]
         if elapsed < COOLDOWN_SECONDS:
             remaining = int(COOLDOWN_SECONDS - elapsed)
             return JSONResponse(
                 status_code=429,
-                content={"error": "cooldown_active", "message": f"Cooldown active: {remaining}s remaining.", "remaining_seconds": remaining}
+                content={"error": "cooldown_active", "message": f"Cooldown: {remaining}s remaining.", "remaining_seconds": remaining}
             )
 
         try:
-            logger.info(f"Device [{device_id}] querying @{BOT_USERNAME} with query: {cleaned_query}")
+            logger.info(f"Querying database for [{cleaned_query}]")
             
             messages_collected = []
-            async with client.conversation(BOT_USERNAME, timeout=35) as conv:
+            async with client.conversation(BOT_USERNAME, timeout=40) as conv:
                 await conv.send_message(cleaned_query)
                 
-                # 1. Wait for initial response
+                # 1. Wait for initial response (stats / header)
                 first_response = await conv.get_response()
-                if first_response.raw_text or first_response.message:
-                    messages_collected.append((first_response.raw_text or first_response.message).strip())
+                first_text = (first_response.raw_text or first_response.message or "").strip()
+                if first_text:
+                    messages_collected.append(first_text)
                 
-                # 2. Wait for any subsequent detailed messages
-                while True:
-                    try:
-                        next_response = await conv.get_response(timeout=4)
-                        text = (next_response.raw_text or next_response.message or "").strip()
-                        if text:
-                            messages_collected.append(text)
-                    except asyncio.TimeoutError:
-                        break
+                # 2. Wait for main data message
+                main_data_msg = None
+                try:
+                    next_response = await conv.get_response(timeout=4)
+                    main_data_msg = next_response
+                except asyncio.TimeoutError:
+                    if first_response.buttons:
+                        main_data_msg = first_response
+
+                # 3. Check for Full Download File first
+                file_dump = None
+                if main_data_msg:
+                    file_dump = await try_download_full_file(client, BOT_USERNAME, main_data_msg, conv)
+
+                if file_dump:
+                    messages_collected.append(file_dump)
+                elif main_data_msg:
+                    # 4. Auto-Fetch all paginated pages (1/3, 2/3, 3/3...)
+                    all_pages = await fetch_all_paginated_pages(client, BOT_USERNAME, main_data_msg)
+                    if all_pages:
+                        if len(all_pages) > 1:
+                            for idx, pg in enumerate(all_pages):
+                                formatted_page = f"[ PAGE {idx + 1} / {len(all_pages)} ]\n" + pg
+                                messages_collected.append(formatted_page)
+                        else:
+                            messages_collected.append(all_pages[0])
 
             # Translate collected messages
             translated_messages = []
@@ -287,8 +409,8 @@ async def search_number(req: SearchRequest):
                 trans = safe_translate(msg_text)
                 translated_messages.append(trans)
 
-            divider = "\n\n" + "—" * 35 + "\n\n"
-            final_text = divider.join(translated_messages) if translated_messages else "No response returned by bot."
+            divider = "\n\n" + "═" * 45 + "\n\n"
+            final_text = divider.join(translated_messages) if translated_messages else "No response returned."
             
             # Update device usage in SQLite
             update_device_search(device_id)
@@ -306,14 +428,12 @@ async def search_number(req: SearchRequest):
             }
 
         except asyncio.TimeoutError:
-            logger.error("Timeout waiting for bot response.")
-            raise HTTPException(status_code=504, detail="The bot did not respond in time (35s timeout). Please try again later.")
+            raise HTTPException(status_code=504, detail="Operation timed out. Please try again.")
         except errors.FloodWaitError as e:
-            logger.error(f"FloodWaitError: {e.seconds} seconds required.")
-            raise HTTPException(status_code=429, detail=f"Telegram flood limit reached. Please wait {e.seconds} seconds.")
+            raise HTTPException(status_code=429, detail=f"Rate limit reached. Please wait {e.seconds} seconds.")
         except Exception as e:
-            logger.error(f"Error querying bot: {e}")
-            raise HTTPException(status_code=500, detail=f"Error communicating with bot: {str(e)}")
+            logger.error(f"Query error: {e}")
+            raise HTTPException(status_code=500, detail="Database query processing error.")
 
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 if not os.path.exists(static_dir):
@@ -325,7 +445,7 @@ async def serve_index():
     index_file = os.path.join(static_dir, "index.html")
     if os.path.exists(index_file):
         return FileResponse(index_file)
-    return {"message": "Telegram Bot Bridge API is running."}
+    return {"message": "Service active."}
 
 if __name__ == "__main__":
     import uvicorn
