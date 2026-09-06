@@ -9,6 +9,7 @@ import urllib.request
 from contextlib import asynccontextmanager
 from typing import Optional, List
 
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse
@@ -109,31 +110,57 @@ COMMON_LABELS = {
     "Pracovná pozícia:": "Job Title:",
 }
 
-def clean_html_to_plain_text(raw_text: str) -> str:
-    """Converts raw HTML dump into clean human-readable text without any HTML tags."""
-    if not raw_text:
+def clean_html_report(raw_text: str) -> str:
+    """Completely strips CSS, styles, scripts, HTML tags and returns clean spacious text."""
+    if not raw_text or ("<" not in raw_text and ">" not in raw_text):
         return raw_text
 
-    # 1. Replace structural tags with newlines
-    s = re.sub(r'<(br|p|div|tr|li|h[1-6])[^>]*>', '\n', raw_text, flags=re.IGNORECASE)
-    # 2. Strip all remaining HTML tags (<tag>, </tag>)
-    s = re.sub(r'<[^>]+>', '', s)
-    # 3. Unescape HTML entities (&nbsp;, &amp;, &quot;, etc.)
-    s = html.unescape(s)
-    # 4. Clean empty whitespace lines
-    lines = [line.strip() for line in s.split('\n')]
-    cleaned_lines = []
-    for line in lines:
-        if line:
-            cleaned_lines.append(line)
-    return '\n'.join(cleaned_lines)
+    try:
+        soup = BeautifulSoup(raw_text, "html.parser")
+
+        # 1. Decompose style, script, head, meta, link, and right-hand sidebars
+        for tag in soup.find_all(["style", "script", "head", "meta", "link", "nav", "aside", "header"]):
+            tag.decompose()
+
+        for nav in soup.find_all(class_=re.compile(r"(right|nav|menu|index|sidebar)", re.I)):
+            nav.decompose()
+
+        # 2. Convert <br> and <p> to newlines
+        for br in soup.find_all(["br", "p"]):
+            br.replace_with("\n")
+
+        # 3. Extract leak blocks if structured
+        blocks = [d for d in soup.find_all("div") if d.get("class") == ["block"] or (d.get("id") and re.match(r"^p\d+", d.get("id")))]
+        if blocks:
+            formatted_blocks = []
+            for b in blocks:
+                b_text = b.get_text()
+                lines = [l.strip() for l in b_text.split("\n") if l.strip()]
+                if lines:
+                    formatted_blocks.append("\n".join(lines))
+            if formatted_blocks:
+                return ("\n\n" + "═" * 40 + "\n\n").join(formatted_blocks)
+
+        # Fallback text extraction
+        text = soup.get_text()
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning(f"HTML clean error: {e}")
+        # Regex fallback
+        s = re.sub(r"<style[\s\S]*?</style>", "", raw_text, flags=re.I)
+        s = re.sub(r"<script[\s\S]*?</script>", "", s, flags=re.I)
+        s = re.sub(r"<(br|p|div|tr)[^>]*>", "\n", s, flags=re.I)
+        s = re.sub(r"<[^>]+>", "", s)
+        lines = [l.strip() for l in s.split("\n") if l.strip()]
+        return "\n".join(lines)
 
 def safe_translate(text: str) -> str:
     if not text or not text.strip():
         return text
 
-    # First clean any HTML tags if present
-    cleaned = clean_html_to_plain_text(text)
+    # First clean any HTML/CSS tags completely
+    cleaned = clean_html_report(text)
 
     modified = cleaned
     for k, v in COMMON_LABELS.items():
@@ -158,7 +185,7 @@ def safe_translate(text: str) -> str:
 
     return "\n\n".join(translated_paragraphs)
 
-# Keep-Alive Background Worker to prevent Render instance sleep
+# Keep-Alive Background Worker
 async def keep_alive_worker():
     await asyncio.sleep(60)
     while True:
@@ -288,7 +315,7 @@ async def fetch_all_paginated_pages(client: TelegramClient, target_bot: str, mai
     return pages
 
 async def try_download_full_file(client: TelegramClient, target_bot: str, main_msg, conv) -> Optional[str]:
-    """Checks for [Download] button and extracts file content if available."""
+    """Checks for [Download] button and extracts clean file content if available."""
     if not main_msg or not main_msg.buttons:
         return None
 
@@ -306,7 +333,7 @@ async def try_download_full_file(client: TelegramClient, target_bot: str, main_m
         return None
 
     try:
-        logger.info("Auto-clicking [Download] button for full unpaginated dump...")
+        logger.info("Auto-clicking [Download] button for full dump...")
         await download_button.click()
         
         file_msg = await conv.get_response(timeout=8)
@@ -315,7 +342,7 @@ async def try_download_full_file(client: TelegramClient, target_bot: str, main_m
             if downloaded_bytes:
                 try:
                     text_content = downloaded_bytes.decode("utf-8", errors="ignore")
-                    cleaned_dump = clean_html_to_plain_text(text_content)
+                    cleaned_dump = clean_html_report(text_content)
                     if len(cleaned_dump.strip()) > 20:
                         logger.info(f"Successfully downloaded and cleaned full file dump ({len(cleaned_dump)} chars).")
                         return cleaned_dump.strip()
@@ -390,7 +417,7 @@ async def search_number(req: SearchRequest):
             async with client.conversation(BOT_USERNAME, timeout=40) as conv:
                 await conv.send_message(cleaned_query)
                 
-                # 1. Wait for initial response (stats / header)
+                # 1. Wait for initial response
                 first_response = await conv.get_response()
                 first_text = (first_response.raw_text or first_response.message or "").strip()
                 if first_text:
@@ -423,13 +450,13 @@ async def search_number(req: SearchRequest):
                         else:
                             messages_collected.append(all_pages[0])
 
-            # Translate & clean collected messages
+            # Translate & format collected messages
             translated_messages = []
             for msg_text in messages_collected:
                 trans = safe_translate(msg_text)
                 translated_messages.append(trans)
 
-            divider = "\n\n" + "═" * 45 + "\n\n"
+            divider = "\n\n" + "═" * 42 + "\n\n"
             final_text = divider.join(translated_messages) if translated_messages else "No response returned."
             
             # Update device usage in SQLite
