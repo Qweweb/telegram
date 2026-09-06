@@ -1,4 +1,6 @@
 import os
+import re
+import html
 import time
 import asyncio
 import logging
@@ -12,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from telethon import TelegramClient, errors, custom
+from telethon import TelegramClient, errors
 from telethon.sessions import StringSession
 from deep_translator import GoogleTranslator
 
@@ -107,11 +109,33 @@ COMMON_LABELS = {
     "Pracovná pozícia:": "Job Title:",
 }
 
+def clean_html_to_plain_text(raw_text: str) -> str:
+    """Converts raw HTML dump into clean human-readable text without any HTML tags."""
+    if not raw_text:
+        return raw_text
+
+    # 1. Replace structural tags with newlines
+    s = re.sub(r'<(br|p|div|tr|li|h[1-6])[^>]*>', '\n', raw_text, flags=re.IGNORECASE)
+    # 2. Strip all remaining HTML tags (<tag>, </tag>)
+    s = re.sub(r'<[^>]+>', '', s)
+    # 3. Unescape HTML entities (&nbsp;, &amp;, &quot;, etc.)
+    s = html.unescape(s)
+    # 4. Clean empty whitespace lines
+    lines = [line.strip() for line in s.split('\n')]
+    cleaned_lines = []
+    for line in lines:
+        if line:
+            cleaned_lines.append(line)
+    return '\n'.join(cleaned_lines)
+
 def safe_translate(text: str) -> str:
     if not text or not text.strip():
         return text
 
-    modified = text
+    # First clean any HTML tags if present
+    cleaned = clean_html_to_plain_text(text)
+
+    modified = cleaned
     for k, v in COMMON_LABELS.items():
         modified = modified.replace(k, v)
 
@@ -219,7 +243,7 @@ async def fetch_all_paginated_pages(client: TelegramClient, target_bot: str, mai
     
     current_msg = main_msg
     page_count = 1
-    max_pages = 12  # Safety ceiling
+    max_pages = 12
     
     while current_msg and page_count <= max_pages:
         raw = (current_msg.raw_text or current_msg.message or "").strip()
@@ -227,7 +251,6 @@ async def fetch_all_paginated_pages(client: TelegramClient, target_bot: str, mai
             seen_texts.add(raw)
             pages.append(raw)
         
-        # Check for inline buttons with next arrow
         if not current_msg.buttons:
             break
             
@@ -245,17 +268,14 @@ async def fetch_all_paginated_pages(client: TelegramClient, target_bot: str, mai
             break
             
         try:
-            # Click next page button
             logger.info(f"Auto-fetching Next Page ({page_count + 1})...")
             await next_button.click()
-            await asyncio.sleep(1.8)  # Wait for Telegram message edit to register
+            await asyncio.sleep(1.8)
             
-            # Fetch updated message content from Telegram
             updated_messages = await client.get_messages(target_bot, ids=current_msg.id)
             if updated_messages:
                 updated_text = (updated_messages.raw_text or updated_messages.message or "").strip()
                 if updated_text == raw or updated_text in seen_texts:
-                    # Content did not change, reached end of pages
                     break
                 current_msg = updated_messages
                 page_count += 1
@@ -289,16 +309,16 @@ async def try_download_full_file(client: TelegramClient, target_bot: str, main_m
         logger.info("Auto-clicking [Download] button for full unpaginated dump...")
         await download_button.click()
         
-        # Await incoming document / file message from bot
         file_msg = await conv.get_response(timeout=8)
         if file_msg and file_msg.media:
             downloaded_bytes = await client.download_media(file_msg, bytes)
             if downloaded_bytes:
                 try:
                     text_content = downloaded_bytes.decode("utf-8", errors="ignore")
-                    if len(text_content.strip()) > 20:
-                        logger.info(f"Successfully downloaded full file dump ({len(text_content)} chars).")
-                        return text_content.strip()
+                    cleaned_dump = clean_html_to_plain_text(text_content)
+                    if len(cleaned_dump.strip()) > 20:
+                        logger.info(f"Successfully downloaded and cleaned full file dump ({len(cleaned_dump)} chars).")
+                        return cleaned_dump.strip()
                 except Exception:
                     pass
     except Exception as e:
@@ -403,7 +423,7 @@ async def search_number(req: SearchRequest):
                         else:
                             messages_collected.append(all_pages[0])
 
-            # Translate collected messages
+            # Translate & clean collected messages
             translated_messages = []
             for msg_text in messages_collected:
                 trans = safe_translate(msg_text)
