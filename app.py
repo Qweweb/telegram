@@ -147,7 +147,6 @@ def clean_html_report(raw_text: str) -> str:
         return "\n".join(lines)
     except Exception as e:
         logger.warning(f"HTML clean error: {e}")
-        # Regex fallback
         s = re.sub(r"<style[\s\S]*?</style>", "", raw_text, flags=re.I)
         s = re.sub(r"<script[\s\S]*?</script>", "", s, flags=re.I)
         s = re.sub(r"<(br|p|div|tr)[^>]*>", "\n", s, flags=re.I)
@@ -159,7 +158,6 @@ def safe_translate(text: str) -> str:
     if not text or not text.strip():
         return text
 
-    # First clean any HTML/CSS tags completely
     cleaned = clean_html_report(text)
 
     modified = cleaned
@@ -185,41 +183,52 @@ def safe_translate(text: str) -> str:
 
     return "\n\n".join(translated_paragraphs)
 
+async def ensure_connected() -> bool:
+    """Ensures the Telegram client is connected and authorized. Automatically reconnects if TCP connection dropped."""
+    global client
+    if not client:
+        if API_ID and API_HASH and API_ID != "your_api_id_here":
+            try:
+                api_id_int = int(API_ID)
+                if TG_SESSION_STRING and TG_SESSION_STRING.strip():
+                    client = TelegramClient(StringSession(TG_SESSION_STRING.strip()), api_id_int, API_HASH)
+                else:
+                    session_path = os.path.join(os.path.dirname(__file__), "user_session")
+                    client = TelegramClient(session_path, api_id_int, API_HASH)
+            except Exception as e:
+                logger.error(f"Client creation failed: {e}")
+                return False
+        else:
+            return False
+
+    try:
+        if not client.is_connected():
+            logger.info("Reconnecting Telegram client...")
+            await client.connect()
+        return bool(client.is_connected() and await client.is_user_authorized())
+    except Exception as e:
+        logger.error(f"Error in ensure_connected: {e}")
+        return False
+
 # Keep-Alive Background Worker
 async def keep_alive_worker():
-    await asyncio.sleep(60)
+    await asyncio.sleep(30)
     while True:
         try:
+            await ensure_connected()
             render_url = os.getenv("RENDER_EXTERNAL_URL", "https://telegram-search-app.onrender.com")
             if render_url:
                 urllib.request.urlopen(f"{render_url}/api/status", timeout=10)
                 logger.info("Self-ping keep-alive successful.")
         except Exception:
             pass
-        await asyncio.sleep(600)
+        await asyncio.sleep(300)  # Ping every 5 minutes
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global client
     logger.info("Initializing Core Engine...")
-    
-    if API_ID and API_HASH and API_ID != "your_api_id_here":
-        try:
-            api_id_int = int(API_ID)
-            if TG_SESSION_STRING and TG_SESSION_STRING.strip():
-                client = TelegramClient(StringSession(TG_SESSION_STRING.strip()), api_id_int, API_HASH)
-            else:
-                session_path = os.path.join(os.path.dirname(__file__), "user_session")
-                client = TelegramClient(session_path, api_id_int, API_HASH)
-
-            await client.connect()
-            if await client.is_user_authorized():
-                logger.info("Core Engine Connected Successfully.")
-            else:
-                logger.warning("Session authorization required.")
-        except Exception as e:
-            logger.error(f"Initialization error: {e}")
-
+    await ensure_connected()
     asyncio.create_task(keep_alive_worker())
     yield
     if client and client.is_connected():
@@ -233,7 +242,7 @@ class SearchRequest(BaseModel):
 
 @app.get("/api/status")
 async def get_status(device_id: Optional[str] = "default_device"):
-    is_connected = bool(client and client.is_connected() and await client.is_user_authorized())
+    is_connected = await ensure_connected()
     dev = get_device_info(device_id)
     
     elapsed = time.time() - dev["last_search_time"]
@@ -264,7 +273,6 @@ async def reset_cooldown(req: ResetRequest):
     }
 
 async def fetch_all_paginated_pages(client: TelegramClient, target_bot: str, main_msg) -> List[str]:
-    """Automatically navigates through all [➡️] pages and aggregates the entire content."""
     pages = []
     seen_texts = set()
     
@@ -315,7 +323,6 @@ async def fetch_all_paginated_pages(client: TelegramClient, target_bot: str, mai
     return pages
 
 async def try_download_full_file(client: TelegramClient, target_bot: str, main_msg, conv) -> Optional[str]:
-    """Checks for [Download] button and extracts clean file content if available."""
     if not main_msg or not main_msg.buttons:
         return None
 
@@ -355,7 +362,6 @@ async def try_download_full_file(client: TelegramClient, target_bot: str, main_m
 
 @app.post("/api/search")
 async def search_number(req: SearchRequest):
-    global client
     cleaned_query = req.query.strip()
     device_id = req.device_id.strip() if req.device_id else "default_device"
 
@@ -390,10 +396,9 @@ async def search_number(req: SearchRequest):
             }
         )
 
-    if not client or not client.is_connected():
-        raise HTTPException(status_code=503, detail="Search system is offline.")
-    if not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Search system authorization required.")
+    is_connected = await ensure_connected()
+    if not is_connected:
+        raise HTTPException(status_code=503, detail="Search system is offline. Please try again in 5 seconds.")
 
     async with query_lock:
         dev = get_device_info(device_id)
@@ -417,7 +422,7 @@ async def search_number(req: SearchRequest):
             async with client.conversation(BOT_USERNAME, timeout=40) as conv:
                 await conv.send_message(cleaned_query)
                 
-                # 1. Wait for initial response
+                # 1. Wait for initial response (stats / header)
                 first_response = await conv.get_response()
                 first_text = (first_response.raw_text or first_response.message or "").strip()
                 if first_text:
